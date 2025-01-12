@@ -2,10 +2,37 @@
 namespace App\Services;
 
 use Illuminate\Support\Facades\Session;
+use App\Exceptions\CarServiceException;
 
 class CarService
 {
     protected $state;
+
+    const MAX_FUEL_CAPACITY = 50;
+    const FUEL_ECONOMY = 2.5;  // Fuel consumption per 25km drive
+    const MAX_WINDOW_POSITION = 100;
+    const MIN_WINDOW_POSITION = 0;
+    const FUEL_THRESHOLD = 2.5; // Minimum fuel level to start the car
+
+    // Constants for states and events
+    const STATE_LOCKED = 'locked';
+    const STATE_UNLOCKED = 'unlocked';
+    const STATE_CAR_OFF = false;
+    const STATE_CAR_ON = true;
+
+    const EVENTS = [
+        'driver-unlocks-doors' => 'unlockDoors',
+        'driver-locks-doors' => 'lockDoors',
+        'driver-turns-car-on' => 'turnCarOn',
+        'driver-turns-car-off' => 'turnCarOff',
+        'driver-listen-radio' => 'listenRadio',
+        'driver-listen-cd' => 'listenCd',
+        'driver-listen-spotify' => 'listenSpotify',
+        'add-fuel' => 'addFuel',
+        'driver-lowers-windows' => 'lowerWindows',
+        'driver-raises-windows' => 'raiseWindows',
+        'drive' => 'drive'
+    ];
 
     public function __construct()
     {
@@ -15,11 +42,11 @@ class CarService
     protected function initializeState()
     {
         return [
-            'doors' => 'locked',
-            'car_on' => false,
+            'doors' => self::STATE_LOCKED,
+            'car_on' => self::STATE_CAR_OFF,
             'entertainment_unit' => 'radio',
-            'fuel_level' => 10,
-            'windows' => ['left' => 100, 'right' => 100],
+            'fuel_level' => self::FUEL_THRESHOLD * 4,  // 10 as initial fuel level
+            'windows' => ['left' => self::MAX_WINDOW_POSITION, 'right' => self::MAX_WINDOW_POSITION],
             'driving' => false,
             'odometer' => 0,
         ];
@@ -32,7 +59,10 @@ class CarService
 
     public function updateState(array $updates)
     {
-        $this->state = array_merge($this->state, $updates);
+        foreach ($updates as $key => $value) {
+            $this->state[$key] = $value;
+        }
+
         Session::put('car_state', $this->state);
     }
 
@@ -44,73 +74,106 @@ class CarService
 
     public function handleEvent(string $event, $value = null)
     {
-        switch ($event) {
-            case 'driver-unlocks-doors':
-                $this->state['doors'] = 'unlocked';
-                break;
+        if (!array_key_exists($event, self::EVENTS)) {
+            throw new CarServiceException("Invalid event: $event");
+        }
 
-            case 'driver-locks-doors':
-                $this->state['doors'] = 'locked';
-                break;
+        $method = self::EVENTS[$event];
+        $this->$method($value);
+    }
 
-            case 'driver-turns-car-on':
-                $this->state['car_on'] = true;
-                break;
+    // Event Methods
+    protected function unlockDoors()
+    {
+        $this->state['doors'] = self::STATE_UNLOCKED;
+    }
 
-            case 'driver-turns-car-off':
-                $this->state['car_on'] = false;
-                $this->state['driving'] = false;
-                break;
+    protected function lockDoors()
+    {
+        $this->state['doors'] = self::STATE_LOCKED;
+    }
 
-            case 'driver-listen-radio':
-                if ($this->state['car_on']) {
-                    $this->state['entertainment_unit'] = 'radio';
-                }
-                break;
+    protected function turnCarOn()
+    {
+        if ($this->isFuelLow()) {
+            $this->state['car_on'] = self::STATE_CAR_OFF;
+        } else {
+            $this->state['car_on'] = self::STATE_CAR_ON;
+        }
+    }
 
-            case 'driver-listen-cd':
-                if ($this->state['car_on']) {
-                    $this->state['entertainment_unit'] = 'cd';
-                }
-                break;
+    protected function turnCarOff()
+    {
+        $this->state['car_on'] = self::STATE_CAR_OFF;
+        $this->state['driving'] = false;
+    }
 
-            case 'driver-listen-spotify':
-                if ($this->state['car_on']) {
-                    $this->state['entertainment_unit'] = 'spotify';
-                }
-                break;
+    protected function listenRadio()
+    {
+        $this->setEntertainmentUnit('radio');
+    }
 
-            case 'add-fuel':
-                if (!$this->state['driving'] && is_numeric($value)) {
-                    $newFuelLevel = $this->state['fuel_level'] + (50 * $value);
-                    $this->state['fuel_level'] = min(50, $newFuelLevel);
-                }
-                break;
+    protected function listenCd()
+    {
+        $this->setEntertainmentUnit('cd');
+    }
 
-            case 'driver-lowers-windows':
-                if ($this->state['car_on'] && isset($this->state['windows'][$value])) {
-                    $this->state['windows'][$value] = max(0, $this->state['windows'][$value] - 50);
-                }
-                break;
+    protected function listenSpotify()
+    {
+        $this->setEntertainmentUnit('spotify');
+    }
 
-            case 'driver-raises-windows':
-                if ($this->state['car_on'] && isset($this->state['windows'][$value])) {
-                    $this->state['windows'][$value] = min(100, $this->state['windows'][$value] + 50);
-                }
-                break;
+    protected function addFuel($value)
+    {
+        if ($this->state['driving']) {
+            throw new CarServiceException('Add fuel not possible when driving');
+        }
 
-            case 'drive':
-                if ($value === 'drive' && $this->state['car_on'] && !$this->state['driving'] && $this->state['fuel_level'] >= 2.5) {
-                    $this->state['driving'] = true;
-                    $this->state['fuel_level'] -= 2.5; // Consumes 2.5L for 25km
-                    $this->state['odometer'] += 25;
-                } elseif ($value === 'stop') {
-                    $this->state['driving'] = false;
-                }
-                break;
+        if (is_numeric($value)) {
+            $newFuelLevel = $this->state['fuel_level'] + (self::MAX_FUEL_CAPACITY * $value);
+            $this->state['fuel_level'] = min(self::MAX_FUEL_CAPACITY, $newFuelLevel);
+        }
+    }
 
-            default:
-                break;
+    protected function lowerWindows($window)
+    {
+        if ($this->state['car_on'] && isset($this->state['windows'][$window])) {
+            $this->state['windows'][$window] = max(self::MIN_WINDOW_POSITION, $this->state['windows'][$window] - 50);
+        }
+    }
+
+    protected function raiseWindows($window)
+    {
+        if ($this->state['car_on'] && isset($this->state['windows'][$window])) {
+            $this->state['windows'][$window] = min(self::MAX_WINDOW_POSITION, $this->state['windows'][$window] + 50);
+        }
+    }
+
+    protected function drive($action)
+    {
+        if ($this->isFuelLow()) {
+            throw new CarServiceException('Not enough fuel to drive.');
+        }
+
+        if ($action === 'drive' && $this->state['car_on'] && !$this->state['driving']) {
+            $this->state['driving'] = true;
+            $this->state['fuel_level'] -= self::FUEL_ECONOMY;
+            $this->state['odometer'] += 25;
+        } elseif ($action === 'stop') {
+            $this->state['driving'] = false;
+        }
+    }
+
+    protected function isFuelLow()
+    {
+        return $this->state['fuel_level'] < self::FUEL_THRESHOLD;
+    }
+
+    protected function setEntertainmentUnit($unit)
+    {
+        if ($this->state['car_on']) {
+            $this->state['entertainment_unit'] = $unit;
         }
     }
 }
+
